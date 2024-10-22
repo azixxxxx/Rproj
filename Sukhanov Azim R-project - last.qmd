@@ -1,0 +1,296 @@
+---
+title: "MPT and Portfolio Optimization"
+author: "Sukhanov Azim"
+format:
+  html:
+    embed-resources: true
+editor: visual
+---
+
+![](https://www.hse.ru/mirror/pubs/share/520282343){#fig-HSE width="126"}
+
+## What are MPT and Efficient frontier
+
+MPT means Modern Portfolio Theory, pioneered by Harry Markowitz in his paper "Portfolio Selection", which was published in 1952. This mathematical framework is used to build a portfolio of investments that maximize the amount of expected return for the collective level of risk. Key component of the theory is portfolio diversification. Markowitz argued that investors could achieve best performance by choosing optimal mix of the two based on their individual tolerance to risk.[^1].
+
+[^1]: [Investopedia](https://www.investopedia.com/terms/m/modernportfoliotheory.asp)
+
+The efficient frontier is the set of optimal portfolios that offer the highest expected return for a defined level of risk or the lowest risk for a given level of expected return.[^2]
+
+[^2]: [Investopedia](https://www.investopedia.com/terms/e/efficientfrontier.asp)
+
+## What we aim to achieve?
+
+Create an optimal portfolio, that:
+
+-   maximizes returns with optimal level of risk;
+
+-   minimizes risks with optimal level of returns.
+
+## Methodology.
+
+-   Use **Mean-Variance Optimization** to build effective frontier;
+
+-   Accept the concept of **Sharpe ratio** to select the optimal portfolio.
+
+## Data collection
+
+**Asset Selection:**
+
+-   We chose 10 stocks to include them in portfolio, then used "quantmod" library to collect them:
+
+```{r}
+library(quantmod)
+stocks_env <- new.env()
+tickers <- c("SAP.DE", "ASML.AS", "MC.PA", "ADS.DE", "RACE.MI", "AIR.PA", "RMS.PA", "BAS.DE", "IFX.DE","SIE.DE")
+```
+
+Based on Bloomberg data, these stocks were selected because they demonstrated the best performance in terms of Debt-to-EBITDA (D/EBITDA) and Price-to-Earnings (P/EPS) ratios for the year 2019. These two ratios are key financial metrics used to assess the leverage and profitability of a company. Low D/EBITDA indicates strong cash flow relative to debt, while a favorable P/E ratio suggests an undervalued stock or a high level of earnings relative to its price. The companies in this list represent leading players in their respective industries, chosen for their strong financial health and attractive valuation metrics as of 2019.
+
+| Companies             | P/E      | D/EBITDA |
+|-----------------------|----------|----------|
+| SAP DE                | 42.53529 | 2.35     |
+| ASML Holdings         | 49.47467 | 1.55     |
+| LVMH                  | 31.49275 | 1.14     |
+| ADIDAS AG             | 28.99537 | 0.9      |
+| Ferrari               | 55.04    | 0.36     |
+| AIRBUS                | 29.1     | 0.46     |
+| HERMES International  | 52.11    | 1.08     |
+| BASF                  | 193.52   | 0.8      |
+| INFENION Tehcnologies | 46.31    | 1.5      |
+| SIEMENS AG            | 27,69    | 0.87     |
+
+: Now, after we decided what data to collect, setting our environment up and created a value named tickers, we should start working with "quantmod" package to collect our data.
+
+```{r}
+getSymbols(tickers, from = "2019-01-01", to = "2024-01-01", env = stocks_env)
+```
+
+### Data Preprocessing
+
+After we collected our data we should get our prices out of environment to convert them into returns, let's make a short function to get the prices:
+
+```{r}
+cl_list <- lapply(ls(stocks_env), \(name) {
+  get(name, envir = stocks_env) |> Cl()
+})
+prices <- do.call(merge, cl_list)
+colnames(prices) <- ls(stocks_env)
+```
+
+Now we have our close prices, we can convert them into log returns by using ROC function from "PerformanceAnalytics" package:
+
+```{r}
+library(PerformanceAnalytics)
+returns <- na.locf(ROC(prices, type = "continuous"))
+returns <- na.omit(returns)
+```
+
+We calculated our returns, we can create a plot with "PerformanceAnalytics" package:
+
+```{r}
+charts.PerformanceSummary(returns,  main = "Returns of our Assets")
+```
+
+### Statistical analysis
+
+First of all we need to calculate mean returns by using colMean function:
+
+```{r}
+mean_returns <- colMeans(returns)
+```
+
+After that we can build covariance matrix:
+
+```{r}
+cov_matrix <- cov(returns)
+```
+
+Let's create a Heatmap of correlation matrix by using package "corrplot":
+
+```{r}
+library(corrplot)
+cor_matrix <- cor(returns)
+corrplot(cor_matrix, method = "color", type = "upper", order = "hclust", addCoef.col = "black", tl.col = "black", tl.srt = 45, diag = FALSE)
+mtext("Correlation Matrix Heatmap", side = 1, line = 4, adj = 0.2, cex = 1.2, font = 2)
+```
+
+The matrix indicates a **moderate to high correlation** between most stocks in the portfolio, suggesting that many of the selected stocks are affected by similar market forces or industry-specific trends. This reduces the level of diversification. There are a few lower correlations (e.g., RACE.MI with ADS.DE, AIR.PA), which might help balance the portfolio to some extent, though the overall correlation across the portfolio should be closely monitored to manage risk effectively.
+
+### Portfolio Optimization and construction of efficient frontier
+
+For our portfolio optimization we will use package named "CVXR" (Disciplined Convex Optimization), that provides an object-oriented modeling language for convex optimization, it allows the user to formulate convex optimization problems in a natural mathematical syntax rather than the restrictive standard form required by most solvers.
+
+1\) Firstly, we will define our variable and constraints:
+
+```{r}
+library(CVXR)
+w <- Variable(10)
+risk <- quad_form(w, cov_matrix)
+```
+
+2\) Secondly, we will adjust the target returns range:
+
+```{r}
+min_return <- quantile(mean_returns, 0.25) 
+max_return <- quantile(mean_returns, 0.75) 
+target_returns <- seq(from = min_return, to = max_return, length.out = 50)
+```
+
+3\) Thirdly, we will adjust constraints of weights:
+
+```{r}
+min_weight <- 0  
+max_weight <- 0.50 
+```
+
+4\) Now let's build our function to optimize portfolio for different target returns:
+
+```{r}
+x <- lapply(target_returns, function(x) {
+  r <- solve(Problem(Minimize(risk), list(w >= min_weight, w <= max_weight, sum(w) == 1, sum(mean_returns * w) == x)))
+  c(x, sqrt(r$value), round(as.vector(r$getValue(w)), 2))
+})
+```
+
+5\) And let's plot our efficient frontier:
+
+```{r}
+plot(sapply(x, \(x) x[2]), target_returns, type='l', col='red', lwd=2, xlab='Risk', ylab='Return', main='Our Efficient Frontier')
+```
+
+Short explanation:
+
+-   we add the `target_return` in the return constraint for each target return;
+-   we optimize the portfolio to minimize risk for the given target return;
+-   we store the optimized portfolio and calculate its expected return and risk.
+
+6\) Let's calcullate Sharpe Ratio:
+
+```{r}
+risk_free_rate <- 0.03
+sharpe_ratios <- sapply(x, function(p) {
+  (p[1] - risk_free_rate) / p[2]
+})
+```
+
+7\) Now we need to find a portfolio with the highest Sharpe Ratio:
+
+```{r}
+optimal_portfolio_idx <- which.max(sharpe_ratios)
+optimal_portfolio <- x[[optimal_portfolio_idx]]
+optimal_return <- optimal_portfolio[1]
+optimal_risk <- optimal_portfolio[2]
+optimal_weights <- optimal_portfolio[3:12]
+```
+
+8\) Let's display the optimal portfolio details with UNIX command "cat":
+
+```{r}
+cat("Optimal portfolio return:", optimal_return, "\n")
+cat("Optimal portfolio risk:", optimal_risk, "\n")
+cat("Optimal weights:", optimal_weights, "\n")
+```
+
+9\) And for the end of this part, we need to visualize what we did:
+
+```{r}
+plot(sapply(x, function(x) x[2]), target_returns * 100, type = 'l', col = 'red', lwd = 2, xlab = 'Risk', ylab = 'Mean Daily Return (%)', main = 'Efficient Frontier'); axis(2, at = pretty(target_returns * 100), labels = format(pretty(target_returns * 100), digits = 2)); points(optimal_risk, optimal_return * 100, col = 'blue', pch = 19, cex = 1.5); text(optimal_risk, optimal_return * 100, labels = "Optimal Portfolio", pos = 3, offset = 0.8, col = "blue", xpd = TRUE)
+```
+
+Explanation:
+
+-   The red point marks the portfolio with the maximum Sharpe ratio, often referred to as the optimal portfolio;
+
+-   The shape of the frontier demonstrates the trade-off between risk and return—portfolios to the right have higher risk but also the potential for higher returns. This is the portfolio that maximizes the Sharpe ratio, meaning it offers the best risk-adjusted return;
+
+## Analyzing the optimal portfolio
+
+1\) We can examine the weights of each asset from our optimal portfolio:
+
+```{r}
+portfolio_table <- data.frame(Asset = tickers,Weight = round(optimal_weights, 2))
+print(portfolio_table)
+```
+
+#### **Asset Allocation:**
+
+-   Some assets, like **RMS.PA**, **BAS.DE**, and **IFX.DE**, have significant weights, indicating that the optimization allocated more capital to these stocks;
+-   Other assets, such as **SAP.DE**, **ASML.AS**, and **ADS.DE**, have 0 weight, that means that they were not included in the optimal portfolio, possibly because they did not contribute positively to the risk-return trade-off.
+
+#### **Diversification:**
+
+-   The portfolio has significant weight allocated to just a few assets, specifically **RMS.PA** (38%) and **BAS.DE** (41%). Such a high concentration in these two stocks indicates that the portfolio is heavily reliant on their performance. If either of these assets performs poorly, it could negatively impact the entire portfolio;
+-   Several assets, such as **SAP.DE**, **ASML.AS**, and **ADS.DE**, have zero allocation. This suggests that the optimizer didn’t find them beneficial for the portfolio based on the risk-return trade-off, but this also means that the portfolio might not be well-diversified across sectors or asset types.
+
+## Back-testing the optimal portfolio
+
+1\) Let's calculate portfolio returns over time:
+
+```{r}
+portfolio_returns <- returns %*% as.numeric(optimal_weights)
+```
+
+2.1) Let's plot the result firstly with R basic graphics:
+
+```{r}
+cumulative_returns <- cumprod(1 + portfolio_returns)
+plot(cumulative_returns, type = 'l', col = 'red', lwd = 2, main = 'Cumulative Returns of the Optimal Portfolio', xlab = 'Days of Back-resting', ylab = 'Cumulative Return')
+```
+
+2.2) We can also use much powerful library for graphics "ggplot2". We will need to activate it and create a data frame to work with:
+
+```{r}
+library(ggplot2)
+library(ggthemes)
+df <- data.frame(Days = 1:length(cumulative_returns), CumulativeReturn = cumulative_returns)
+```
+
+and plot the result:
+
+```{r}
+ggplot(df, aes(x = Days, y = CumulativeReturn)) + geom_line(color = "red", linewidth = 1) + labs(title = "Cumulative Returns of the Optimal Portfolio", x = "Days of Back-testing", y = "Cumulative Return") + theme_wsj() + theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+```
+
+3\) Get benchmark data and compare our results to benchmark:
+
+```{r}
+getSymbols("^STOXX50E", from = "2019-01-01", to = "2024-01-01")
+benchmark_prices <- Ad(STOXX50E)
+benchmark_returns <- na.omit(ROC(benchmark_prices, type = "continuous"))
+cumulative_benchmark <- cumprod(1 + benchmark_returns)
+```
+
+4\) Plot our results:
+
+```{r}
+portfolio_returns_xts <- xts(portfolio_returns, order.by = index(returns))
+stoxx50_returns_xts <- xts(benchmark_returns, order.by = index(benchmark_returns))
+combined_returns <- merge(portfolio_returns_xts, stoxx50_returns_xts, join = "inner")
+colnames(combined_returns) <- c("Optimal Portfolio", "STOXX 50")
+charts.PerformanceSummary(combined_returns, main = "Optimal Portfolio vs STOXX 50")
+```
+
+5\) Let's compute performance metrics:
+
+```{r}
+performance_metrics <- rbind(table.AnnualizedReturns(combined_returns),maxDrawdown(combined_returns),CalmarRatio(combined_returns))
+rownames(performance_metrics)[4:5] <- c("Max Drawdown", "Calmar Ratio")
+print(performance_metrics)
+```
+
+Comments:
+
+-   Annualized Return: the portfolio has delivered a strong annualized return of **22.04%**, significantly outperforming the benchmark return of **6.48%**. This indicates that the portfolio's selected assets and weights have been well-optimized for generating higher returns compared to the benchmark;
+
+-   Annualized Standard Deviation (Risk): the portfolio has a higher standard deviation compared to the benchmark, sitting at **22.68%**, which indicates greater volatility (risk). The increased risk is likely associated with the concentrated allocation to a few high-return stocks;
+
+-   Annualized Sharpe Ratio: the Sharpe Ratio, which measures risk-adjusted return, is **0.9716** for the portfolio, indicating that the portfolio is providing strong returns relative to its risk. While the portfolio has more volatility, it compensates by delivering higher returns;
+
+-   Max Drawdown: the portfolio has experienced a significant maximum drawdown of **39.73%**, suggesting that during a market downturn, it suffered considerable losses. This is expected given the high concentration in certain stocks, which increases vulnerability during volatile periods;
+
+-   Calmar Ratio: the Calmar Ratio, which measures return relative to drawdown, is **0.5547** for the portfolio, indicating that despite the high drawdown, the portfolio still provides a decent return relative to its losses.
+
+## Summary
+
+If the investor's objective is to maximize return with an acceptance of higher risk, the portfolio is performing well. However, for a more risk-averse strategy, adjustments toward greater diversification may be beneficial.
